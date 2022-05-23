@@ -4,6 +4,7 @@ import copy
 import math
 import random
 import typing
+import queue
 
 import numpy as np
 
@@ -21,6 +22,7 @@ from river.tree.nodes.arf_htr_nodes import (
 )
 from river.tree.splitter import Splitter
 from river.utils.random import poisson
+from sortedcontainers import SortedList
 
 
 class BaseForest(base.Ensemble):
@@ -140,6 +142,122 @@ class BaseForest(base.Ensemble):
         # max_features > n, then use n
         if self.max_features > n_features:
             self.max_features = n_features
+
+class BaseForestCP(BaseForest):
+    """
+    A modification of the BaseForest class that renders it compatible with 
+    conformal prediction. Additions and modifications:
+        cp_exact: bool
+            Indicates whether or not forest is implementing CPExact or CPApprox.
+        calibration_set: queue
+            FIFO queue of lists [x,y, y_hat], where (x,y) is the training 
+            example and y_hat is an up-to-date calibration prediction 
+        calibration_scores: SortedList
+            sorted list of absolute errors |y- y_hat|
+        l_oob: dict of type tuple(string):list
+            Maps calibration set elements (x,y) to the models in the forest for 
+            which [x,y] is out-of-bag.
+            Since l_oob is a dict, we must store the objects x,y in immutable form.
+            We do so via their string representations repr(x), repr(y).
+    """
+
+    def __init__(self, c_max: int = 1000, cp_exact: bool = False,  **kwargs):
+        super().__init__(**kwargs)
+        self.cp_exact = cp_exact
+        self.calibration_set = queue.Queue(maxsize=c_max)
+        self.calibration_scores = SortedList([])
+        self.l_oob = dict()
+
+
+    def learn_one(self, x: dict, y: base.typing.Target, **kwargs):
+        self._n_samples_seen += 1
+        x_is_oob = False
+
+        if not self:
+            self._init_ensemble(list(x.keys()))
+
+        for model in self:
+            # Get prediction for instance
+            y_pred = model.predict_one(x)
+
+            # Update performance evaluator
+            model.metric.update(y_true=y, y_pred=y_pred)
+
+            k = poisson(rate=self.lambda_value, rng=self._rng)
+            if k > 0:
+                model.learn_one(
+                    x=x, y=y, sample_weight=k, n_samples_seen=self._n_samples_seen
+                )
+            else:
+                x_is_oob = True
+                self.l_oob_add(x, y, model)
+        if x_is_oob:
+            self.add_calibration_example(x,y,y_pred)   
+
+        return self
+
+    def l_oob_add(self, x, y, model):
+        """
+        Adds model to (x,y)'s set in l_oob.
+        Since l_oob is a dict, we must store the objects x,y in immutable form.
+        We do so via their string representations repr(x), repr(y).
+        """
+        x_s, y_s = repr(x), repr(y)
+        if (x_s, y_s) in self.l_oob:
+            self.l_oob[(x_s,y_s)] = self.l_oob[(x_s,y_s)].append(model)
+        else:
+            self.l_oob[(x_s,y_s)] = [model]
+
+    def l_oob_remove(self, x, y):
+        """
+        Removes (x,y) from l_oob's keys, and the corresponding values.
+        Since l_oob is a dict, we must store the objects x,y in immutable form.
+        We do so via their string representations repr(x), repr(y).
+        """
+        l_oob.pop((repr(x), repr(y)))
+
+    def add_calibration_example(self,x,y, y_hat):
+        """
+        Adds (x,y,y_hat) to calibration set and calibration_scores.
+        Note adding to l_oob is handled in the learn_one function, not here.
+        """
+        while self.calibration_set.full():
+            self.delete_calibration_example()
+
+        self.calibration_set.put([x,y,y_hat])
+        self.calibration_scores.add(abs(y-y_hat))
+
+
+    def delete_calibration_example(self):
+        """
+        Deletes the oldest example from the calibration set and its 
+        corresponding entries in calibration_scores and l_oob.
+        """
+        if self.calibration_set.empty() == False:
+            # Delete from C
+            c_example = calibration_set.get()
+            x,y,y_hat = c_example[0], c_example[1], c_example[2]
+            # Delete |y - y_hat| from S
+            calibration_scores.discard(abs(y-y_hat))
+            # Delete from l_oob.
+            self.l_oob_remove(x,y)
+
+    def update_calibration_scores(self):
+        """
+        Updates all calibration scores and calibration predictions y_hat. 
+        Note this function is only called when self.cp_exact = True; otherwise 
+        the calibration scores are only updated at learning time.
+        """
+        new_scores = SortedList([])
+        for c_example in self.calibration_set:
+            x,y, y_hat_old = c_example[0], c_example[1], c_example[2]
+            oob_predictions = [model.predict_one(x) for model in self.l_oob[(x,y)]]
+            y_hat_new = sum(oob_predictions)/len(oob_predictions)
+            # Update calibration set y_hat
+            c_example[2] = y_hat_new
+            new_scores.add(abs(y-y_hat_new))
+        # Update calibration scores
+        self.calibration_scores = new_scores
 
 
 class BaseTreeClassifier(tree.HoeffdingTreeClassifier):
@@ -823,6 +941,300 @@ class AdaptiveRandomForestRegressor(BaseForest, base.Regressor):
             y_pred = np.median(y_pred)
 
         return y_pred
+
+    def _new_base_model(self, seed: int):
+        return BaseTreeRegressor(
+            max_features=self.max_features,
+            grace_period=self.grace_period,
+            max_depth=self.max_depth,
+            split_confidence=self.split_confidence,
+            tie_threshold=self.tie_threshold,
+            leaf_prediction=self.leaf_prediction,
+            leaf_model=self.leaf_model,
+            model_selector_decay=self.model_selector_decay,
+            nominal_attributes=self.nominal_attributes,
+            splitter=self.splitter,
+            binary_split=self.binary_split,
+            max_size=self.max_size,
+            memory_estimate_period=self.memory_estimate_period,
+            stop_mem_management=self.stop_mem_management,
+            remove_poor_attrs=self.remove_poor_attrs,
+            merit_preprune=self.merit_preprune,
+            seed=seed,
+        )
+
+    @property
+    def valid_aggregation_method(self):
+        """Valid aggregation_method values."""
+        return self._VALID_AGGREGATION_METHOD
+
+
+class AdaptiveRandomForestRegressorCP(BaseForestCP, base.Regressor):
+    r"""Adaptive Random Forest regressor, adapted for conformal prediction.
+
+    The 3 most important aspects of Adaptive Random Forest [^1] are:
+
+    1. inducing diversity through re-sampling
+
+    2. inducing diversity through randomly selecting subsets of features for
+       node splits
+
+    3. drift detectors per base tree, which cause selective resets in response
+       to drifts
+
+    Notice that this implementation is slightly different from the original
+    algorithm proposed in [^2]. The `HoeffdingTreeRegressor` is used as base
+    learner, instead of `FIMT-DD`. It also adds a new strategy to monitor the
+    predictions and check for concept drifts. The deviations of the predictions
+    to the target are monitored and normalized in the [0, 1] range to fulfill ADWIN's
+    requirements. We assume that the data subjected to the normalization follows
+    a normal distribution, and thus, lies within the interval of the mean $\pm3\sigma$.
+
+    Parameters
+    ----------
+    n_models
+        Number of trees in the ensemble.
+    max_features
+        Max number of attributes for each node split.<br/>
+        - If `int`, then consider `max_features` at each split.<br/>
+        - If `float`, then `max_features` is a percentage and
+          `int(max_features * n_features)` features are considered per split.<br/>
+        - If "sqrt", then `max_features=sqrt(n_features)`.<br/>
+        - If "log2", then `max_features=log2(n_features)`.<br/>
+        - If None, then ``max_features=n_features``.
+    lambda_value
+        The lambda value for bagging (lambda=6 corresponds to Leveraging Bagging).
+    metric
+        Metric used to track trees performance within the ensemble. Depending,
+        on the configuration, this metric is also used to weight predictions
+        from the members of the ensemble.
+    aggregation_method
+        The method to use to aggregate predictions in the ensemble.<br/>
+        - 'mean'<br/>
+        - 'median' - If selected will disable the weighted vote.
+    disable_weighted_vote
+        If `True`, disables the weighted vote prediction, i.e. does not assign
+        weights to individual tree's predictions and uses the arithmetic mean
+        instead. Otherwise will use the `metric` value to weight predictions.
+    drift_detector
+        Drift Detection method. Set to None to disable Drift detection.
+    warning_detector
+        Warning Detection method. Set to None to disable warning detection.
+    grace_period
+        [*Tree parameter*] Number of instances a leaf should observe between
+        split attempts.
+    max_depth
+        [*Tree parameter*] The maximum depth a tree can reach. If `None`, the
+        tree will grow indefinitely.
+    split_confidence
+        [*Tree parameter*] Allowed error in split decision, a value closer to 0
+        takes longer to decide.
+    tie_threshold
+        [*Tree parameter*] Threshold below which a split will be forced to break
+        ties.
+    leaf_prediction
+        [*Tree parameter*] Prediction mechanism used at leaves.</br>
+        - 'mean' - Target mean</br>
+        - 'model' - Uses the model defined in `leaf_model`</br>
+        - 'adaptive' - Chooses between 'mean' and 'model' dynamically</br>
+    leaf_model
+        [*Tree parameter*] The regression model used to provide responses if
+        `leaf_prediction='model'`. If not provided, an instance of
+        `river.linear_model.LinearRegression` with the default hyperparameters
+         is used.
+    model_selector_decay
+        [*Tree parameter*] The exponential decaying factor applied to the learning models'
+        squared errors, that are monitored if `leaf_prediction='adaptive'`. Must be
+        between `0` and `1`. The closer to `1`, the more importance is going to
+        be given to past observations. On the other hand, if its value
+        approaches `0`, the recent observed errors are going to have more
+        influence on the final decision.
+    nominal_attributes
+        [*Tree parameter*] List of Nominal attributes. If empty, then assume that
+        all attributes are numerical.
+    splitter
+        [*Tree parameter*] The Splitter or Attribute Observer (AO) used to monitor the class
+        statistics of numeric features and perform splits. Splitters are available in the
+        `tree.splitter` module. Different splitters are available for classification and
+        regression tasks. Classification and regression splitters can be distinguished by their
+        property `is_target_class`. This is an advanced option. Special care must be taken when
+        choosing different splitters.By default, `tree.splitter.EBSTSplitter` is used if
+        `splitter` is `None`.
+    min_samples_split
+        [*Tree parameter*] The minimum number of samples every branch resulting from a split
+        candidate must have to be considered valid.
+    binary_split
+        [*Tree parameter*] If True, only allow binary splits.
+    max_size
+        [*Tree parameter*] Maximum memory (MB) consumed by the tree.
+    memory_estimate_period
+        [*Tree parameter*] Number of instances between memory consumption checks.
+    stop_mem_management
+        [*Tree parameter*] If True, stop growing as soon as memory limit is hit.
+    remove_poor_attrs
+        [*Tree parameter*] If True, disable poor attributes to reduce memory usage.
+    merit_preprune
+        [*Tree parameter*] If True, enable merit-based tree pre-pruning.
+    seed
+        Random seed for reproducibility.
+    c_max
+        Maximum size of calibration set.
+    cp_exact
+        If True, update calibration scores according to CPExact algorithm. If 
+        false, update calibration scores according to CPApproximate algorithm.
+
+    References
+    ----------
+    [^1]: Gomes, H.M., Bifet, A., Read, J., Barddal, J.P., Enembreck, F.,
+          Pfharinger, B., Holmes, G. and Abdessalem, T., 2017. Adaptive random
+          forests for evolving data stream classification. Machine Learning,
+          106(9-10), pp.1469-1495.
+
+    [^2]: Gomes, H.M., Barddal, J.P., Boiko, L.E., Bifet, A., 2018.
+          Adaptive random forests for data stream regression. ESANN 2018.
+
+    Examples
+    --------
+    >>> from river import datasets
+    >>> from river import evaluate
+    >>> from river import metrics
+    >>> from river import ensemble
+    >>> from river import preprocessing
+
+    >>> dataset = datasets.TrumpApproval()
+
+    >>> model = (
+    ...     preprocessing.StandardScaler() |
+    ...     ensemble.AdaptiveRandomForestRegressor(seed=42)
+    ... )
+
+    >>> metric = metrics.MAE()
+
+    >>> evaluate.progressive_val_score(dataset, model, metric)
+    MAE: 0.994917
+
+    """
+
+    _MEAN = "mean"
+    _MEDIAN = "median"
+    _VALID_AGGREGATION_METHOD = [_MEAN, _MEDIAN]
+
+    def __init__(
+        self,
+        # CP parameters
+        c_max: int = 1000,
+        cp_exact: bool = False,
+        # Forest parameters
+        n_models: int = 10,
+        max_features="sqrt",
+        aggregation_method: str = "median",
+        lambda_value: int = 6,
+        metric: metrics.RegressionMetric = metrics.MSE(),
+        disable_weighted_vote=True,
+        drift_detector: base.DriftDetector = ADWIN(0.001),
+        warning_detector: base.DriftDetector = ADWIN(0.01),
+        # Tree parameters
+        grace_period: int = 50,
+        max_depth: int = None,
+        split_confidence: float = 0.01,
+        tie_threshold: float = 0.05,
+        leaf_prediction: str = "model",
+        leaf_model: base.Regressor = None,
+        model_selector_decay: float = 0.95,
+        nominal_attributes: list = None,
+        splitter: Splitter = None,
+        min_samples_split: int = 5,
+        binary_split: bool = False,
+        max_size: int = 500,
+        memory_estimate_period: int = 2_000_000,
+        stop_mem_management: bool = False,
+        remove_poor_attrs: bool = False,
+        merit_preprune: bool = True,
+        seed: int = None,
+    ):
+        super().__init__(
+            c_max = c_max,
+            cp_exact = cp_exact,
+            n_models=n_models,
+            max_features=max_features,
+            lambda_value=lambda_value,
+            metric=metric,
+            disable_weighted_vote=disable_weighted_vote,
+            drift_detector=drift_detector,
+            warning_detector=warning_detector,
+            seed=seed
+        )
+
+        self._n_samples_seen = 0
+        self._base_member_class = ForestMemberRegressor
+
+        # Tree parameters
+        self.grace_period = grace_period
+        self.max_depth = max_depth
+        self.split_confidence = split_confidence
+        self.tie_threshold = tie_threshold
+        self.leaf_prediction = leaf_prediction
+        self.leaf_model = leaf_model
+        self.model_selector_decay = model_selector_decay
+        self.nominal_attributes = nominal_attributes
+        self.splitter = splitter
+        self.min_samples_split = min_samples_split
+        self.binary_split = binary_split
+        self.max_size = max_size
+        self.memory_estimate_period = memory_estimate_period
+        self.stop_mem_management = stop_mem_management
+        self.remove_poor_attrs = remove_poor_attrs
+        self.merit_preprune = merit_preprune
+
+        if aggregation_method in self._VALID_AGGREGATION_METHOD:
+            self.aggregation_method = aggregation_method
+        else:
+            raise ValueError(
+                f"Invalid aggregation_method: {aggregation_method}.\n"
+                f"Valid values are: {self._VALID_AGGREGATION_METHOD}"
+            )
+
+    def predict_one(self, x: dict) -> base.typing.RegTarget:
+
+        if not self.models:
+            self._init_ensemble(features=list(x.keys()))
+            return 0.0
+
+        y_pred = np.zeros(self.n_models)
+
+        if not self.disable_weighted_vote and self.aggregation_method != self._MEDIAN:
+            weights = np.zeros(self.n_models)
+            sum_weights = 0.0
+            for idx, model in enumerate(self.models):
+                y_pred[idx] = model.predict_one(x)
+                weights[idx] = model.metric.get()
+                sum_weights += weights[idx]
+
+            if sum_weights != 0:
+                # The higher the error, the worse is the tree
+                weights = sum_weights - weights
+                # Normalize weights to sum up to 1
+                weights /= weights.sum()
+                y_pred *= weights
+        else:
+            for idx, model in enumerate(self.models):
+                y_pred[idx] = model.predict_one(x)
+
+        if self.aggregation_method == self._MEAN:
+            y_pred = y_pred.mean()
+        else:
+            y_pred = np.median(y_pred)
+
+        return y_pred
+
+    def predict_interval(self, x, alpha):
+        y_hat = self.predict_one(x)
+        if self.cp_exact == True:
+            self.update_calibration_scores()
+        calibration_idx = math.floor((1-alpha)* len(self.calibration_scores))
+        conf_interval_width = self.calibration_scores[calibration_idx]
+        interval = [y_hat - conf_interval_width, y_hat + conf_interval_width]
+        return interval
 
     def _new_base_model(self, seed: int):
         return BaseTreeRegressor(

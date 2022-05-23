@@ -9,6 +9,7 @@ aggregate predictions from different kinds of models.
 from .adaptive_random_forest import (
     AdaptiveRandomForestClassifier,
     AdaptiveRandomForestRegressor,
+    AdaptiveRandomForestRegressorCP
 )
 from .bagging import (
     ADWINBaggingClassifier,
@@ -25,6 +26,7 @@ from .voting import VotingClassifier
 __all__ = [
     "AdaptiveRandomForestClassifier",
     "AdaptiveRandomForestRegressor",
+    "AdaptiveRandomForestRegressorCP",
     "AdaBoostClassifier",
     "ADWINBaggingClassifier",
     "BaggingClassifier",

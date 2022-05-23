@@ -31,7 +31,7 @@ AUTHOR = "Max Halford"
 REQUIRES_PYTHON = ">=3.7.0"
 
 # Package requirements.
-base_packages = ["numpy>=1.20.0", "scipy>=1.4.1", "pandas>=1.0.1"]
+base_packages = ["numpy>=1.20.0", "scipy>=1.4.1", "pandas>=1.0.1", "sortedcontainers"]
 
 compat_packages = base_packages + [
     "scikit-learn",
@@ -73,28 +73,28 @@ with io.open(os.path.join(here, "README.md"), encoding="utf-8") as f:
     long_description = "\n" + f.read()
 
 # Load the package's __version__.py module as a dictionary.
-about: dict = {}
-with open(os.path.join(here, NAME, "__version__.py")) as f:
-    exec(f.read(), about)
+#about: dict = {}
+#with open(os.path.join(here, NAME, "__version__.py")) as f:
+#    exec(f.read(), about)
 
 # Where the magic happens:
 setuptools.setup(
     name=NAME,
-    version=about["__version__"],
+    version=1,#about["__version__"],
     description=DESCRIPTION,
     long_description=long_description,
     long_description_content_type=LONG_DESCRIPTION_CONTENT_TYPE,
     author=AUTHOR,
     author_email=EMAIL,
     python_requires=REQUIRES_PYTHON,
-    url=URL,
+    #url=URL,
     packages=setuptools.find_packages(exclude=("tests",)),
     install_requires=base_packages,
     extras_require={
         "dev": dev_packages,
         "compat": compat_packages,
         "docs": docs_packages,
-        "extra": [f"river_extra=={about['__version__']}"],
+        #"extra": [f"river_extra=={about['__version__']}"],
         ":python_version == '3.6'": ["dataclasses"],
     },
     include_package_data=True,
