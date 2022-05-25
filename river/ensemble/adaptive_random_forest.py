@@ -23,6 +23,9 @@ from river.tree.nodes.arf_htr_nodes import (
 from river.tree.splitter import Splitter
 from river.utils.random import poisson
 from sortedcontainers import SortedList
+from datasketches import kll_floats_sketch
+
+from river.tree.nodes.branch import DTBranch
 
 
 class BaseForest(base.Ensemble):
@@ -1261,6 +1264,45 @@ class AdaptiveRandomForestRegressorCP(BaseForestCP, base.Regressor):
     def valid_aggregation_method(self):
         """Valid aggregation_method values."""
         return self._VALID_AGGREGATION_METHOD
+
+
+class AdaptiveRandomForestRegressorQRF(AdaptiveRandomForestRegressor):
+    """
+    Extra parameters:
+        K, for the datasketch.
+            - Is this a float or an int?
+    """
+
+    def __init__(self, k_sketch= 200, **kwargs):
+        super().__init__(**kwargs)
+        self.k_sketch = k_sketch
+
+    def learn_one(self, x: dict, y: base.typing.Target, **kwargs):
+        AdaptiveRandomForestRegressor.learn_one(self, x=x, y=y, **kwargs)
+        
+        # Find leaves to which x is routed
+        for model in self.models:
+            if model.model._root is not None:
+                if isinstance(model.model._root, DTBranch):
+                    leaf = model.model._root.traverse(x, until_leaf=True)
+                else:
+                    leaf = model.model._root
+            if not hasattr(leaf, "kll_sketch"):
+                new_sketch = kll_floats_sketch(self.k_sketch)
+                leaf.kll_sketch = new_sketch
+            leaf.kll_sketch.update(y)
+
+    def predict_interval(self, x, alpha):
+        final_sketch = kll_floats_sketch(self.k_sketch)
+        for model in self.models:
+            if model.model._root is not None:
+                if isinstance(model.model._root, DTBranch):
+                    leaf = model.model._root.traverse(x, until_leaf=True)
+                else:
+                    leaf = model.model._root
+            if hasattr(leaf, "kll_sketch"):
+                final_sketch.merge(leaf.kll_sketch)
+        return final_sketch.get_quantiles([alpha/2, 1- (alpha/2)])
 
 
 class BaseForestMember:

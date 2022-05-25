@@ -9,7 +9,8 @@ aggregate predictions from different kinds of models.
 from .adaptive_random_forest import (
     AdaptiveRandomForestClassifier,
     AdaptiveRandomForestRegressor,
-    AdaptiveRandomForestRegressorCP
+    AdaptiveRandomForestRegressorCP, 
+    AdaptiveRandomForestRegressorQRF
 )
 from .bagging import (
     ADWINBaggingClassifier,
@@ -27,6 +28,7 @@ __all__ = [
     "AdaptiveRandomForestClassifier",
     "AdaptiveRandomForestRegressor",
     "AdaptiveRandomForestRegressorCP",
+    "AdaptiveRandomForestRegressorQRF",
     "AdaBoostClassifier",
     "ADWINBaggingClassifier",
     "BaggingClassifier",
