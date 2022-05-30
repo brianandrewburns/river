@@ -265,17 +265,6 @@ class BaseForestCP(BaseForest):
         self.calibration_set = new_calibration_set
         self.calibration_scores = new_scores
 
-        # new_calibration_set = 
-        # for c_example in self.calibration_set:
-        #     x,y, y_hat_old = c_example[0], c_example[1], c_example[2]
-        #     oob_predictions = [model.predict_one(x) for model in self.l_oob[(x,y)]]
-        #     y_hat_new = sum(oob_predictions)/len(oob_predictions)
-        #     # Update calibration set y_hat
-        #     c_example[2] = y_hat_new
-        #     new_scores.add(abs(y-y_hat_new))
-        # # Update calibration scores
-        # self.calibration_scores = new_scores
-
 
 class BaseTreeClassifier(tree.HoeffdingTreeClassifier):
     """Adaptive Random Forest Hoeffding Tree Classifier.
@@ -1304,10 +1293,10 @@ class AdaptiveRandomForestRegressorQRF(AdaptiveRandomForestRegressor):
                     leaf = model.model._root.traverse(x, until_leaf=True)
                 else:
                     leaf = model.model._root
-            if not hasattr(leaf, "kll_sketch"):
-                new_sketch = kll_floats_sketch(self.k_sketch)
-                leaf.kll_sketch = new_sketch
-            leaf.kll_sketch.update(y)
+                if not hasattr(leaf, "kll_sketch"):
+                    new_sketch = kll_floats_sketch(self.k_sketch)
+                    leaf.kll_sketch = new_sketch
+                leaf.kll_sketch.update(y)
 
     def predict_interval(self, x, alpha):
         final_sketch = kll_floats_sketch(self.k_sketch)
@@ -1319,6 +1308,8 @@ class AdaptiveRandomForestRegressorQRF(AdaptiveRandomForestRegressor):
                     leaf = model.model._root
             if hasattr(leaf, "kll_sketch"):
                 final_sketch.merge(leaf.kll_sketch)
+        if final_sketch.is_empty():
+            return [-math.inf, math.inf]
         return final_sketch.get_quantiles([alpha/2, 1- (alpha/2)])
 
 
