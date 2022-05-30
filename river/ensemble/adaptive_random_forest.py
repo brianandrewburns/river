@@ -207,7 +207,7 @@ class BaseForestCP(BaseForest):
         """
         x_s, y_s = repr(x), repr(y)
         if (x_s, y_s) in self.l_oob:
-            self.l_oob[(x_s,y_s)] = self.l_oob[(x_s,y_s)].append(model)
+            self.l_oob[(x_s,y_s)].append(model)
         else:
             self.l_oob[(x_s,y_s)] = [model]
 
@@ -217,7 +217,7 @@ class BaseForestCP(BaseForest):
         Since l_oob is a dict, we must store the objects x,y in immutable form.
         We do so via their string representations repr(x), repr(y).
         """
-        l_oob.pop((repr(x), repr(y)))
+        self.l_oob.pop((repr(x), repr(y)))
 
     def add_calibration_example(self,x,y, y_hat):
         """
@@ -238,10 +238,10 @@ class BaseForestCP(BaseForest):
         """
         if self.calibration_set.empty() == False:
             # Delete from C
-            c_example = calibration_set.get()
+            c_example = self.calibration_set.get()
             x,y,y_hat = c_example[0], c_example[1], c_example[2]
             # Delete |y - y_hat| from S
-            calibration_scores.discard(abs(y-y_hat))
+            self.calibration_scores.discard(abs(y-y_hat))
             # Delete from l_oob.
             self.l_oob_remove(x,y)
 
@@ -252,15 +252,29 @@ class BaseForestCP(BaseForest):
         the calibration scores are only updated at learning time.
         """
         new_scores = SortedList([])
-        for c_example in self.calibration_set:
-            x,y, y_hat_old = c_example[0], c_example[1], c_example[2]
-            oob_predictions = [model.predict_one(x) for model in self.l_oob[(x,y)]]
+        max_size = self.calibration_set.maxsize
+        new_calibration_set = queue.Queue(maxsize=max_size)
+        while not self.calibration_set.empty():
+            c_example = self.calibration_set.get()
+            x, y = c_example[0], c_example[1]
+            oob_predictions = [model.predict_one(x) for model in self.l_oob[(repr(x),repr(y))]]
             y_hat_new = sum(oob_predictions)/len(oob_predictions)
-            # Update calibration set y_hat
-            c_example[2] = y_hat_new
+            c_example_new = [x,y,y_hat_new]
+            new_calibration_set.put(c_example_new)
             new_scores.add(abs(y-y_hat_new))
-        # Update calibration scores
+        self.calibration_set = new_calibration_set
         self.calibration_scores = new_scores
+
+        # new_calibration_set = 
+        # for c_example in self.calibration_set:
+        #     x,y, y_hat_old = c_example[0], c_example[1], c_example[2]
+        #     oob_predictions = [model.predict_one(x) for model in self.l_oob[(x,y)]]
+        #     y_hat_new = sum(oob_predictions)/len(oob_predictions)
+        #     # Update calibration set y_hat
+        #     c_example[2] = y_hat_new
+        #     new_scores.add(abs(y-y_hat_new))
+        # # Update calibration scores
+        # self.calibration_scores = new_scores
 
 
 class BaseTreeClassifier(tree.HoeffdingTreeClassifier):
@@ -1231,13 +1245,16 @@ class AdaptiveRandomForestRegressorCP(BaseForestCP, base.Regressor):
         return y_pred
 
     def predict_interval(self, x, alpha):
-        y_hat = self.predict_one(x)
-        if self.cp_exact == True:
-            self.update_calibration_scores()
-        calibration_idx = math.floor((1-alpha)* len(self.calibration_scores))
-        conf_interval_width = self.calibration_scores[calibration_idx]
-        interval = [y_hat - conf_interval_width, y_hat + conf_interval_width]
-        return interval
+        if len(self.calibration_scores) == 0:
+            return [-math.inf, math.inf]
+        else:
+            y_hat = self.predict_one(x)
+            if self.cp_exact == True:
+                self.update_calibration_scores()
+            calibration_idx = math.floor((1-alpha)* len(self.calibration_scores))
+            conf_interval_width = self.calibration_scores[calibration_idx]
+            interval = [y_hat - conf_interval_width, y_hat + conf_interval_width]
+            return interval
 
     def _new_base_model(self, seed: int):
         return BaseTreeRegressor(
