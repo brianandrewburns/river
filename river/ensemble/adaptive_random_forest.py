@@ -1283,20 +1283,39 @@ class AdaptiveRandomForestRegressorQRF(AdaptiveRandomForestRegressor):
         super().__init__(**kwargs)
         self.k_sketch = k_sketch
 
+    
     def learn_one(self, x: dict, y: base.typing.Target, **kwargs):
-        AdaptiveRandomForestRegressor.learn_one(self, x=x, y=y, **kwargs)
-        
-        # Find leaves to which x is routed
-        for model in self.models:
-            if model.model._root is not None:
-                if isinstance(model.model._root, DTBranch):
-                    leaf = model.model._root.traverse(x, until_leaf=True)
-                else:
-                    leaf = model.model._root
-                if not hasattr(leaf, "kll_sketch"):
-                    new_sketch = kll_floats_sketch(self.k_sketch)
-                    leaf.kll_sketch = new_sketch
-                leaf.kll_sketch.update(y)
+        self._n_samples_seen += 1
+
+        if not self:
+            self._init_ensemble(list(x.keys()))
+
+        for model in self:
+            # Get prediction for instance
+            y_pred = model.predict_one(x)
+
+            # Update performance evaluator
+            model.metric.update(y_true=y, y_pred=y_pred)
+
+            k = poisson(rate=self.lambda_value, rng=self._rng)
+            if k > 0:
+                model.learn_one(
+                    x=x, y=y, sample_weight=k, n_samples_seen=self._n_samples_seen
+                )
+                # Find leaves to which sketch is routed, adds y to sketches at
+                # those leaves
+                if model.model._root is not None:
+                    if isinstance(model.model._root, DTBranch):
+                        leaf = model.model._root.traverse(x, until_leaf=True)
+                    else:
+                        leaf = model.model._root
+                    if not hasattr(leaf, "kll_sketch"):
+                        new_sketch = kll_floats_sketch(self.k_sketch)
+                        leaf.kll_sketch = new_sketch
+                    leaf.kll_sketch.update(y)
+
+        return self
+
 
     def predict_interval(self, x, alpha):
         final_sketch = kll_floats_sketch(self.k_sketch)
@@ -1306,8 +1325,8 @@ class AdaptiveRandomForestRegressorQRF(AdaptiveRandomForestRegressor):
                     leaf = model.model._root.traverse(x, until_leaf=True)
                 else:
                     leaf = model.model._root
-            if hasattr(leaf, "kll_sketch"):
-                final_sketch.merge(leaf.kll_sketch)
+                if hasattr(leaf, "kll_sketch"):
+                    final_sketch.merge(leaf.kll_sketch)
         if final_sketch.is_empty():
             return [-math.inf, math.inf]
         return final_sketch.get_quantiles([alpha/2, 1- (alpha/2)])
