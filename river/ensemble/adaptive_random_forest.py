@@ -164,12 +164,14 @@ class BaseForestCP(BaseForest):
             We do so via their string representations repr(x), repr(y).
     """
 
-    def __init__(self, c_max: int = 1000, cp_exact: bool = False,  **kwargs):
+    def __init__(self, c_max: int = 1000, cp_exact: bool = False, update_threshold: int =0,  **kwargs):
         super().__init__(**kwargs)
         self.cp_exact = cp_exact
         self.calibration_set = queue.Queue(maxsize=c_max)
         self.calibration_scores = SortedList([])
         self.l_oob = dict()
+        self.update_threshold = update_threshold
+        self.update_counter = 0
 
 
     def learn_one(self, x: dict, y: base.typing.Target, **kwargs):
@@ -251,19 +253,22 @@ class BaseForestCP(BaseForest):
         Note this function is only called when self.cp_exact = True; otherwise 
         the calibration scores are only updated at learning time.
         """
-        new_scores = SortedList([])
-        max_size = self.calibration_set.maxsize
-        new_calibration_set = queue.Queue(maxsize=max_size)
-        while not self.calibration_set.empty():
-            c_example = self.calibration_set.get()
-            x, y = c_example[0], c_example[1]
-            oob_predictions = [model.predict_one(x) for model in self.l_oob[(repr(x),repr(y))]]
-            y_hat_new = sum(oob_predictions)/len(oob_predictions)
-            c_example_new = [x,y,y_hat_new]
-            new_calibration_set.put(c_example_new)
-            new_scores.add(abs(y-y_hat_new))
-        self.calibration_set = new_calibration_set
-        self.calibration_scores = new_scores
+        self.update_counter += 1
+        if self.update_counter > self.update_threshold:
+            self.update_counter = 0
+            new_scores = SortedList([])
+            max_size = self.calibration_set.maxsize
+            new_calibration_set = queue.Queue(maxsize=max_size)
+            while not self.calibration_set.empty():
+                c_example = self.calibration_set.get()
+                x, y = c_example[0], c_example[1]
+                oob_predictions = [model.predict_one(x) for model in self.l_oob[(repr(x),repr(y))]]
+                y_hat_new = sum(oob_predictions)/len(oob_predictions)
+                c_example_new = [x,y,y_hat_new]
+                new_calibration_set.put(c_example_new)
+                new_scores.add(abs(y-y_hat_new))
+            self.calibration_set = new_calibration_set
+            self.calibration_scores = new_scores
 
 
 class BaseTreeClassifier(tree.HoeffdingTreeClassifier):
@@ -1130,6 +1135,7 @@ class AdaptiveRandomForestRegressorCP(BaseForestCP, base.Regressor):
         # CP parameters
         c_max: int = 1000,
         cp_exact: bool = False,
+        update_threshold: int = 0,
         # Forest parameters
         n_models: int = 10,
         max_features="sqrt",
@@ -1161,6 +1167,7 @@ class AdaptiveRandomForestRegressorCP(BaseForestCP, base.Regressor):
         super().__init__(
             c_max = c_max,
             cp_exact = cp_exact,
+            update_threshold = update_threshold,
             n_models=n_models,
             max_features=max_features,
             lambda_value=lambda_value,
